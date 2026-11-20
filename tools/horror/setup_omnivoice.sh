@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Установка OmniVoice (нейросеть VoiceStudio) для CPU: сборка omnivoice.cpp + модели Q8_0 (~950 МБ).
+# Установка OmniVoice (нейросеть VoiceStudio) для CPU: сборка omnivoice.cpp + модели BF16 + Q8_0 (~2.5 ГБ).
 set -euo pipefail
 OV="${OMNIVOICE_HOME:-/opt/omnivoice}"
 mkdir -p "$OV/models"
@@ -9,7 +9,7 @@ if [ ! -x "$OV/src/build/omnivoice-tts" ]; then
   cmake -S "$OV/src" -B "$OV/src/build" -DCMAKE_BUILD_TYPE=Release >/dev/null
   cmake --build "$OV/src/build" --config Release -j "$(nproc)" --target omnivoice-tts >/dev/null
 fi
-for f in omnivoice-base-Q8_0.gguf omnivoice-tokenizer-Q8_0.gguf; do
+for f in omnivoice-base-BF16.gguf omnivoice-tokenizer-BF16.gguf omnivoice-base-Q8_0.gguf omnivoice-tokenizer-Q8_0.gguf; do
   [ -s "$OV/models/$f" ] || curl -fsSL -o "$OV/models/$f.part" \
     "https://huggingface.co/Serveurperso/OmniVoice-GGUF/resolve/main/$f" && mv -f "$OV/models/$f.part" "$OV/models/$f" 2>/dev/null || true
 done
