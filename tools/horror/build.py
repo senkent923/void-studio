@@ -852,7 +852,7 @@ def sound_design(total, ev, voice_env):
     return np.stack([L * duck, R * duck], axis=1)
 
 
-def reverb(x, seconds=0.9, wet=0.14):
+def reverb(x, seconds=0.55, wet=0.05):
     m = int(seconds * SR)
     k = np.arange(m) / SR
     ir = np.random.default_rng(4).standard_normal(m) * np.exp(-k * 6.5)
@@ -903,17 +903,34 @@ def main():
     txt.write_text(story["text"], encoding="utf-8")
 
     # 1. озвучка
-    raw_mp3, words_json = work / "voice_raw.mp3", work / "words.json"
-    if not words_json.exists():
-        env = dict(os.environ, VOICE=story.get("voice", "ru-RU-DmitryNeural"),
-                   RATE=story.get("rate", "-5%"), PITCH=story.get("pitch", "-6Hz"))
-        subprocess.run([sys.executable, str(HERE / "tts_words.py"), str(txt), str(raw_mp3), str(words_json)],
-                       check=True, env=env)
-    words = json.loads(words_json.read_text())
-    voice = load_audio(raw_mp3)
-    rules = {"default": story.get("max_gap", 0.75)}
-    rules.update({int(k): v for k, v in story.get("gaps", {}).items()})
-    voice, words = compress_gaps(voice, words, rules)
+    engine = os.environ.get("HORROR_TTS", story.get("engine", "omnivoice"))
+    if engine == "omnivoice" and not Path(os.environ.get("OMNIVOICE_HOME", "/opt/omnivoice"),
+                                          "models/omnivoice-base-Q8_0.gguf").exists():
+        print("OmniVoice не установлен — ставлю (один раз, ~5 мин)", file=sys.stderr)
+        subprocess.run(["bash", str(HERE / "setup_omnivoice.sh")], check=False)
+        if not Path(os.environ.get("OMNIVOICE_HOME", "/opt/omnivoice"), "models/omnivoice-base-Q8_0.gguf").exists():
+            print("OmniVoice установить не удалось — беру голос Microsoft", file=sys.stderr)
+            engine = "edge"
+    if engine == "omnivoice":
+        # Нейросеть OmniVoice (движок VoiceStudio): живой голос, отдельный голос для реплик в «—»
+        raw, words_json = work / "voice_omni.wav", work / "words_omni.json"
+        if not words_json.exists():
+            subprocess.run([sys.executable, str(HERE / "tts_omni.py"), a.story, str(raw), str(words_json),
+                            "--work", str(work)], check=True)
+        words = json.loads(words_json.read_text())
+        voice = load_audio(raw)
+    else:
+        raw, words_json = work / "voice_raw.mp3", work / "words.json"
+        if not words_json.exists():
+            env = dict(os.environ, VOICE=story.get("voice", "ru-RU-DmitryNeural"),
+                       RATE=story.get("rate", "-5%"), PITCH=story.get("pitch", "+0Hz"))
+            subprocess.run([sys.executable, str(HERE / "tts_words.py"), str(txt), str(raw), str(words_json)],
+                           check=True, env=env)
+        words = json.loads(words_json.read_text())
+        voice = load_audio(raw)
+        rules = {"default": story.get("max_gap", 0.75)}
+        rules.update({int(k): v for k, v in story.get("gaps", {}).items()})
+        voice, words = compress_gaps(voice, words, rules)
     display = align_tokens(story["text"], words)
 
     vo_off = story.get("voice_offset", 0.7)
@@ -962,13 +979,14 @@ def main():
 
     # 2. звук
     voice_track = np.zeros(int(total * SR))
-    v = reverb(voice * 1.0)
+    v = reverb(hp(voice, 75))  # чистый голос: срез гула + лёгкая «комната»
     place(voice_track, v / (np.abs(v).max() + 1e-9) * 0.8, vo_off)
     venv = np.convolve(np.abs(voice_track), np.ones(int(0.25 * SR)) / int(0.25 * SR), mode="same")
     venv = np.clip(venv / (venv.max() + 1e-9) * 2.2, 0, 1)
     amb = sound_design(total, ev, venv)
     mix = amb + voice_track[:, None]
-    mix = np.tanh(mix * 1.1) / 1.1
+    peak = np.abs(mix).max() + 1e-9
+    mix = mix / peak * 0.95
     wav = work / "mix.wav"
     wavfile.write(wav, SR, (mix / (np.abs(mix).max() + 1e-9) * 0.95).astype(np.float32))
 
