@@ -105,3 +105,8 @@ persistent data volumes and a backend URL reachable by the calling client.
 
 
 <!-- Source: https://github.com/debpalash/VoiceStudio/tree/main/skills/voicestudio (AGPL-3.0), adapted with Russian defaults. -->
+
+## Связь со скиллом voiceover
+
+Для готовой озвучки видео используй команду `voiceover` (скилл `voiceover`): она сама
+вызывает этот VoiceStudio, если он запущен, а иначе — нейронные голоса Microsoft или офлайн Piper.
