@@ -1,0 +1,4 @@
+numpy
+scipy
+pycairo
+edge-tts>=7.0

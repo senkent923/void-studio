@@ -13,7 +13,7 @@ ln -sf "$DIR/voiceover.py" "$BIN/voiceover"
 
 # Скиллы Claude Code — на уровне пользователя, чтобы работали в любом проекте.
 mkdir -p "$HOME/.claude/skills"
-for s in voiceover voicestudio; do
+for s in voiceover voicestudio horror-video; do
   rm -rf "$HOME/.claude/skills/$s"
   cp -r "$REPO/.claude/skills/$s" "$HOME/.claude/skills/$s"
 done
@@ -36,3 +36,5 @@ for name in ('irina', 'denis'):
     except Exception as e: print('piper', name, e)
 " || true
 echo "voiceover установлен: $(command -v voiceover || echo $BIN/voiceover)"
+# зависимости генератора хоррор-роликов
+[ -f "$REPO/tools/horror/requirements.txt" ] && python3 -m pip install -q --disable-pip-version-check -r "$REPO/tools/horror/requirements.txt" 2>&1 | grep -v -i warning || true
