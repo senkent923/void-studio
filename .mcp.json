@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "voicestudio": {
+      "type": "http",
+      "url": "http://localhost:3900/mcp"
+    }
+  }
+}
