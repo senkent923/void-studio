@@ -99,7 +99,8 @@
  "caption_y": 1530,
  "engine": "omnivoice",
  "omni_pauses": {
-  "11": 1.0,
-  "12": 1.4
- }
+  "5": 1.0,
+  "6": 1.4
+ },
+ "omni_unit": "line"
 }

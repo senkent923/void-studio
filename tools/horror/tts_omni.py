@@ -24,8 +24,11 @@ from scipy.io import wavfile
 HERE = Path(__file__).resolve().parent
 OV = Path(os.environ.get("OMNIVOICE_HOME", "/opt/omnivoice"))
 BIN = Path(os.environ.get("OMNIVOICE_BIN", OV / "src/build/omnivoice-tts"))
-MODEL = OV / "models/omnivoice-base-Q8_0.gguf"
-CODEC = OV / "models/omnivoice-tokenizer-Q8_0.gguf"
+# точная модель BF16, если скачана; иначе Q8_0
+QUANT = os.environ.get("OMNIVOICE_QUANT") or ("BF16" if (OV / "models/omnivoice-base-BF16.gguf").exists() else "Q8_0")
+MODEL = OV / f"models/omnivoice-base-{QUANT}.gguf"
+CODEC = OV / f"models/omnivoice-tokenizer-{QUANT}.gguf"
+STEPS = int(os.environ.get("OMNIVOICE_STEPS", "32"))
 SR = 24000
 
 VOICES = {
@@ -36,7 +39,8 @@ VOICES = {
 }
 
 
-def run_tts(text, out, *, instruct=None, ref=None, ref_text=None, seed=1, duration=None, steps=32):
+def run_tts(text, out, *, instruct=None, ref=None, ref_text=None, seed=1, duration=None, steps=None):
+    steps = steps or STEPS
     tf = Path(str(out) + ".txt")
     tf.write_text(text, encoding="utf-8")
     argv = [str(BIN), "--model", str(MODEL), "--codec", str(CODEC), "--lang", "Russian",
@@ -71,8 +75,9 @@ def trim(x, thr_db=-42):
     return x[a:b]
 
 
-def split_lines(text):
-    """[(voice, sentence, paragraph_start)]"""
+def split_lines(text, unit="line"):
+    """[(voice, фрагмент, начало_абзаца)]. unit="line" — целая строка (естественная интонация),
+    "sentence" — по предложениям."""
     out = []
     for line in text.splitlines():
         line = line.strip()
@@ -80,10 +85,37 @@ def split_lines(text):
             continue
         voice = "granny" if line.startswith("—") else "narrator"
         line = line.lstrip("— ").strip()
-        sents = [s for s in re.split(r"(?<=[.!?…])\s+", line) if s]
-        for i, s in enumerate(sents):
+        parts = [line] if unit == "line" else [s for s in re.split(r"(?<=[.!?…])\s+", line) if s]
+        for i, s in enumerate(parts):
             out.append((voice, s, i == 0))
     return out
+
+
+def active_rms_db(x):
+    fr = 960
+    n = len(x) // fr
+    if n == 0:
+        return -60.0
+    e = np.sqrt((x[: n * fr].reshape(n, fr) ** 2).mean(1) + 1e-12)
+    act = e[e > 10 ** (-40 / 20)]
+    return 20 * np.log10(np.sqrt((act ** 2).mean()) + 1e-12) if len(act) else -60.0
+
+
+def word_times(path, toks, offset, dur):
+    """Тайминги слов из распознавания Whisper; если слова не сошлись — пропорционально длине."""
+    try:
+        from asr_check import model, load16k, _lock
+        with _lock:
+            segs, _ = model().transcribe(load16k(str(path)), language="ru", word_timestamps=True)
+            ws = [w for s in segs for w in (s.words or [])]
+        if len(ws) == len(toks):
+            return [(offset + w.start, max(0.05, w.end - w.start)) for w in ws]
+    except Exception as e:  # noqa: BLE001
+        print(f"[omni] тайминги через Whisper не вышли: {e}", file=sys.stderr)
+    weights = np.array([len(re.sub(r"\W", "", w)) + 1.5 for w in toks], float)
+    starts = np.concatenate([[0], np.cumsum(weights)[:-1]]) / weights.sum() * dur * 0.94
+    lens = weights / weights.sum() * dur * 0.94
+    return [(offset + s0 + 0.02, ln) for s0, ln in zip(starts, lens)]
 
 
 def main():
@@ -110,7 +142,7 @@ def main():
         refs[name] = p
 
     # 2. фразы
-    lines = split_lines(story["text"])
+    lines = split_lines(story["text"], story.get("omni_unit", "line"))
 
     def synth(i):
         voice, sent, _ = lines[i]
@@ -119,7 +151,7 @@ def main():
         if out.exists() and out.with_suffix(".ok").exists():
             return i, out
         best = (-1, None)
-        for attempt in range(3):
+        for attempt in range(int(os.environ.get("OMNIVOICE_TAKES", "2"))):
             tmp = work / f"s{i:03}_{attempt}.wav"
             dur = len(sent) / v["cps"] + 0.35
             run_tts(sent, tmp, ref=refs[voice], ref_text=v["ref"], seed=v["seed"] + 100 * attempt + i,
@@ -136,27 +168,29 @@ def main():
     with cf.ThreadPoolExecutor(a.jobs) as ex:
         files = dict(ex.map(synth, range(len(lines))))
 
-    # 3. склейка с паузами + тайминги слов (пропорционально длине слов во фразе)
+    # 3. склейка: ровная громкость, паузы, точные тайминги слов
     pauses = story.get("omni_pauses", {})
+    target = {"narrator": -20.0, "granny": -22.5}
     audio, words, t = [np.zeros(int(0.05 * SR), np.float32)], [], 0.05
     for i, (voice, sent, para) in enumerate(lines):
         if i > 0:
             gap = float(pauses.get(str(i), 0.55 if para else 0.32))
             audio.append(np.zeros(int(gap * SR), np.float32)); t += gap
         x = trim(load(files[i]))
-        if voice == "granny":
-            x = x * 1.35
+        x = x * 10 ** ((target.get(voice, -20.0) - active_rms_db(x)) / 20)  # выравнивание громкости
         dur = len(x) / SR
         toks = [w for w in sent.split() if re.search(r"\w", w)]
-        weights = np.array([len(re.sub(r"\W", "", w)) + 1.5 for w in toks], float)
-        starts = np.concatenate([[0], np.cumsum(weights)[:-1]]) / weights.sum() * dur * 0.94
-        lens = weights / weights.sum() * dur * 0.94
-        for w, s0, ln in zip(toks, starts, lens):
-            words.append({"t": t + s0 + 0.02, "d": ln, "w": re.sub(r"[^\wё-]", "", w), "voice": voice})
+        tw = Path(str(files[i]) + ".trim.wav"); wavfile.write(tw, SR, (np.clip(x, -1, 1) * 32767).astype(np.int16))
+        for w, (st, ln) in zip(toks, word_times(tw, toks, t, dur)):
+            words.append({"t": st, "d": ln, "w": re.sub(r"[^\wё-]", "", w), "voice": voice})
         audio.append(x); t += dur
     y = np.concatenate(audio)
-    y = y / (np.abs(y).max() + 1e-9) * 0.9
-    wavfile.write(a.out_wav, SR, (y * 32767).astype(np.int16))
+    raw = Path(a.out_wav).with_suffix(".raw.wav")
+    wavfile.write(raw, SR, (np.clip(y / (np.abs(y).max() + 1e-9) * 0.7, -1, 1) * 32767).astype(np.int16))
+    # мягкая компрессия: голос ровный, без скачков, но живой
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(raw), "-af",
+                    "highpass=f=70,acompressor=threshold=-22dB:ratio=2.5:attack=8:release=180:makeup=2,"
+                    "alimiter=limit=0.9", "-ar", str(SR), a.out_wav], check=True)
     Path(a.out_json).write_text(json.dumps(words, ensure_ascii=False, indent=0))
     print(f"[omni] готово: {len(y) / SR:.1f} c, {len(words)} слов", file=sys.stderr)
 
